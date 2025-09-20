@@ -1,4 +1,4 @@
-import { createFFmpeg, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js";
+import { createFFmpeg, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/ffmpeg.min.mjs";
 
 const form = document.getElementById("converter-form");
 const fileInput = document.getElementById("video-input");
@@ -24,7 +24,7 @@ const initFFmpeg = async () => {
 
     ffmpegInstance = createFFmpeg({
         log: true,
-        corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js",
+        corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/ffmpeg-core.js",
     });
 
     ffmpegInstance.setProgress(({ ratio }) => {
