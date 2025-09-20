@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Autumn Alchemy - Video to Audio Converter</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2321130f'/%3E%3Cpath d='M16 6l3.2 7h6.8l-5.6 4.2 2 7.8L16 20.8 9.6 25l2-7.8L6 13h6.8z' fill='%23d6a647'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="styles.css" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,13 +25,13 @@
         <section class="panel">
             <header>
                 <h1>Autumn Alchemy</h1>
-                <p>Transmute any video into enchanted audio. Choose your brew — MP3 or WAV — and conjure a downloadable spell in seconds.</p>
+                <p>Transmute any video into enchanted audio. Choose your brew (MP3 or WAV) and conjure a downloadable spell in seconds.</p>
             </header>
 
             <form class="converter" id="converter-form">
                 <label class="dropzone" for="video-input">
                     <input type="file" id="video-input" accept="video/*" hidden />
-                    <span class="dropzone__icon">???</span>
+                    <span class="dropzone__icon">&#x1F56F;</span>
                     <span class="dropzone__text">Drop a video offering or click to browse</span>
                     <span class="dropzone__hint">Most formats welcomed: MP4, MOV, MKV, AVI, and more.</span>
                 </label>
@@ -59,12 +60,15 @@
             </div>
 
             <div class="result" id="result" hidden>
-                <p class="result__message">? Your audio spell is ready.</p>
+                <p class="result__message">&#x2728; Your audio spell is ready.</p>
                 <a id="download-link" class="download-btn" download>Download Audio</a>
             </div>
         </section>
     </main>
 
+    <video id="hidden-video" class="hidden-video" playsinline aria-hidden="true"></video>
+
+    <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.0/lame.min.js" defer></script>
     <script type="module" src="app.js"></script>
 </body>
 </html>

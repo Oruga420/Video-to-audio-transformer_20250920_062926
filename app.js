@@ -1,5 +1,3 @@
-import { createFFmpeg, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/ffmpeg.min.mjs";
-
 const form = document.getElementById("converter-form");
 const fileInput = document.getElementById("video-input");
 const convertBtn = form.querySelector(".convert-btn");
@@ -10,148 +8,365 @@ const progressFill = document.getElementById("progress-fill");
 const progressLabel = document.getElementById("progress-label");
 const resultBox = document.getElementById("result");
 const downloadLink = document.getElementById("download-link");
+const hiddenVideo = document.getElementById("hidden-video");
+const dropzone = document.querySelector(".dropzone");
 
-let ffmpegInstance;
-let ffmpegLoaded = false;
 let currentObjectUrl = null;
 let selectedFile = null;
+let audioContext;
 
-const initFFmpeg = async () => {
-    if (ffmpegLoaded) return;
+const supportsCapture =
+    typeof MediaRecorder !== "undefined" &&
+    (typeof hiddenVideo.captureStream === "function" || typeof hiddenVideo.mozCaptureStream === "function");
 
-    statusMessage.textContent = "Summoning ffmpeg spellbook...";
-    convertBtn.disabled = true;
-
-    ffmpegInstance = createFFmpeg({
-        log: true,
-        corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/ffmpeg-core.js",
-    });
-
-    ffmpegInstance.setProgress(({ ratio }) => {
-        const percent = Math.min(100, Math.round(ratio * 100));
-        progressFill.style.width = `${percent}%`;
-        progressLabel.textContent = `${percent}%`;
-    });
-
-    try {
-        await ffmpegInstance.load();
-        ffmpegLoaded = true;
-    } catch (error) {
-        console.error(error);
-        statusMessage.textContent = "The arcane library is out of reach. Check your connection and try again.";
-        throw error;
-    }
+const updateProgress = (percent) => {
+    const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+    progressFill.style.width = `${safePercent}%`;
+    progressLabel.textContent = `${safePercent}%`;
 };
 
 const resetProgress = () => {
-    progressFill.style.width = "0%";
-    progressLabel.textContent = "0%";
+    progressGroup.hidden = true;
+    updateProgress(0);
 };
+
+const waitForEvent = (target, eventName) =>
+    new Promise((resolve) => target.addEventListener(eventName, resolve, { once: true }));
+
+const getCaptureStream = (video) => {
+    if (typeof video.captureStream === "function") return video.captureStream();
+    if (typeof video.mozCaptureStream === "function") return video.mozCaptureStream();
+    return null;
+};
+
+const ensureAudioContext = () => {
+    if (!audioContext || audioContext.state === "closed") {
+        audioContext = new AudioContext();
+    }
+    return audioContext;
+};
+
+const decodeBlobToAudioBuffer = async (blob) => {
+    const buffer = await blob.arrayBuffer();
+    const ctx = ensureAudioContext();
+    return ctx.decodeAudioData(buffer.slice(0));
+};
+
+const interleaveChannels = (audioBuffer) => {
+    const { numberOfChannels, length } = audioBuffer;
+    if (numberOfChannels === 1) {
+        return audioBuffer.getChannelData(0);
+    }
+    const result = new Float32Array(length * numberOfChannels);
+    const channelData = [];
+    for (let channel = 0; channel < numberOfChannels; channel += 1) {
+        channelData.push(audioBuffer.getChannelData(channel));
+    }
+    for (let i = 0; i < length; i += 1) {
+        for (let channel = 0; channel < numberOfChannels; channel += 1) {
+            result[i * numberOfChannels + channel] = channelData[channel][i];
+        }
+    }
+    return result;
+};
+
+const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i += 1) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+};
+
+const encodeWav = (audioBuffer) => {
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const interleaved = interleaveChannels(audioBuffer);
+    const bytesPerSample = 2;
+    const blockAlign = numChannels * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + interleaved.length * bytesPerSample);
+    const view = new DataView(buffer);
+
+    writeString(view, 0, "RIFF");
+    view.setUint32(4, 36 + interleaved.length * bytesPerSample, true);
+    writeString(view, 8, "WAVE");
+    writeString(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    writeString(view, 36, "data");
+    view.setUint32(40, interleaved.length * bytesPerSample, true);
+
+    let offset = 44;
+    for (let i = 0; i < interleaved.length; i += 1) {
+        const sample = Math.max(-1, Math.min(1, interleaved[i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += bytesPerSample;
+    }
+
+    return new Blob([buffer], { type: "audio/wav" });
+};
+
+const floatToInt16 = (buffer) => {
+    const result = new Int16Array(buffer.length);
+    for (let i = 0; i < buffer.length; i += 1) {
+        const sample = Math.max(-1, Math.min(1, buffer[i]));
+        result[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    return result;
+};
+
+const encodeMp3 = (audioBuffer) => {
+    if (!window.lamejs || typeof window.lamejs.Mp3Encoder !== "function") {
+        throw new Error("MP3 encoder library missing. Please reload the page.");
+    }
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const bitrate = 128;
+    const encoder = new window.lamejs.Mp3Encoder(numChannels, sampleRate, bitrate);
+    const blockSize = 1152;
+    const left = audioBuffer.getChannelData(0);
+    const right = numChannels > 1 ? audioBuffer.getChannelData(1) : null;
+    const mp3Data = [];
+
+    for (let i = 0; i < left.length; i += blockSize) {
+        const leftChunk = floatToInt16(left.subarray(i, i + blockSize));
+        let buffer;
+        if (numChannels > 1 && right) {
+            const rightChunk = floatToInt16(right.subarray(i, i + blockSize));
+            buffer = encoder.encodeBuffer(leftChunk, rightChunk);
+        } else {
+            buffer = encoder.encodeBuffer(leftChunk);
+        }
+        if (buffer.length > 0) {
+            mp3Data.push(buffer);
+        }
+    }
+
+    const flushBuffer = encoder.flush();
+    if (flushBuffer.length > 0) {
+        mp3Data.push(flushBuffer);
+    }
+
+    return new Blob(mp3Data, { type: "audio/mpeg" });
+};
+
+const selectRecorderMimeType = () => {
+    const candidates = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
+    for (const type of candidates) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)) {
+            return type;
+        }
+    }
+    return "";
+};
+
+const recordAudioFromVideo = (video, mimeType) =>
+    new Promise((resolve, reject) => {
+        const stream = getCaptureStream(video);
+        if (!stream) {
+            reject(new Error("Unable to capture audio from this browser."));
+            return;
+        }
+        if (stream.getAudioTracks().length === 0) {
+            reject(new Error("No audio track detected in this video."));
+            return;
+        }
+
+        let recorder;
+        try {
+            recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        } catch (error) {
+            reject(error);
+            return;
+        }
+
+        const chunks = [];
+        const handleData = (event) => {
+            if (event.data && event.data.size) {
+                chunks.push(event.data);
+            }
+        };
+        const handleError = (event) => {
+            recorder.removeEventListener("dataavailable", handleData);
+            recorder.removeEventListener("error", handleError);
+            recorder.removeEventListener("stop", handleStop);
+            reject(event.error || new Error("Recorder error occurred."));
+        };
+        const handleStop = () => {
+            recorder.removeEventListener("dataavailable", handleData);
+            recorder.removeEventListener("error", handleError);
+            recorder.removeEventListener("stop", handleStop);
+            resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" }));
+        };
+
+        recorder.addEventListener("dataavailable", handleData);
+        recorder.addEventListener("error", handleError);
+        recorder.addEventListener("stop", handleStop);
+
+        const stopRecording = () => {
+            if (recorder.state !== "inactive") {
+                recorder.stop();
+            }
+        };
+
+        video.addEventListener(
+            "ended",
+            () => {
+                stopRecording();
+            },
+            { once: true }
+        );
+        video.addEventListener(
+            "error",
+            () => {
+                stopRecording();
+                reject(new Error("Video playback failed."));
+            },
+            { once: true }
+        );
+
+        recorder.start();
+        const playPromise = video.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+            playPromise.catch((error) => {
+                stopRecording();
+                reject(error);
+            });
+        }
+    });
+
+if (!supportsCapture) {
+    convertBtn.disabled = true;
+    statusMessage.textContent = "This ritual needs a modern browser with MediaRecorder support.";
+}
 
 fileInput.addEventListener("change", (event) => {
     selectedFile = event.target.files?.[0] ?? null;
     resultBox.hidden = true;
+    resetProgress();
     if (currentObjectUrl) {
         URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = null;
     }
 
-    if (selectedFile) {
+    if (selectedFile && supportsCapture) {
         convertBtn.disabled = false;
         statusMessage.textContent = `Offering received: ${selectedFile.name}`;
+    } else if (!supportsCapture) {
+        convertBtn.disabled = true;
+        statusMessage.textContent = "This ritual needs a modern browser with MediaRecorder support.";
     } else {
         convertBtn.disabled = true;
         statusMessage.textContent = "Awaiting your video...";
     }
 });
 
-form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (!selectedFile) return;
-
-    try {
-        await initFFmpeg();
-    } catch (error) {
-        convertBtn.disabled = false;
-        return;
-    }
-
-    const format = new FormData(form).get("format")?.toString() ?? "mp3";
-    const outputExt = format === "wav" ? "wav" : "mp3";
-    const mimeType = outputExt === "wav" ? "audio/wav" : "audio/mpeg";
-    const inputExt = selectedFile.name.split(".").pop()?.toLowerCase() || "mp4";
-    const inputName = `input.${inputExt}`;
-    const outputName = `output.${outputExt}`;
-
-    convertBtn.disabled = true;
-    statusMessage.textContent = "Brewing your audio potion...";
-    progressGroup.hidden = false;
-    resetProgress();
-    resultBox.hidden = true;
-
-    try {
-        ffmpegInstance.FS("writeFile", inputName, await fetchFile(selectedFile));
-
-        const args =
-            outputExt === "mp3"
-                ? ["-i", inputName, "-vn", "-acodec", "libmp3lame", "-b:a", "192k", outputName]
-                : ["-i", inputName, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", outputName];
-
-        await ffmpegInstance.run(...args);
-        const data = ffmpegInstance.FS("readFile", outputName);
-        const blob = new Blob([data.buffer], { type: mimeType });
-
-        if (currentObjectUrl) {
-            URL.revokeObjectURL(currentObjectUrl);
-        }
-        currentObjectUrl = URL.createObjectURL(blob);
-
-        downloadLink.href = currentObjectUrl;
-        downloadLink.download = `${selectedFile.name.replace(/\.[^/.]+$/, "") || "audio"}.${outputExt}`;
-        statusMessage.textContent = "Transmutation complete.";
-        progressLabel.textContent = "100%";
-        progressFill.style.width = "100%";
-        resultBox.hidden = false;
-    } catch (error) {
-        console.error(error);
-        statusMessage.textContent = "The ritual faltered. Please try again with a different file.";
-    } finally {
-        try {
-            ffmpegInstance.FS("unlink", inputName);
-            ffmpegInstance.FS("unlink", outputName);
-        } catch (cleanupError) {
-            // ignore cleanup failures
-        }
-        convertBtn.disabled = false;
-    }
-});
-
-const dropzone = document.querySelector(".dropzone");
 const highlightDropzone = (isActive) => {
+    if (!dropzone) return;
     dropzone.style.borderColor = isActive ? "rgba(214, 166, 71, 0.85)" : "rgba(214, 166, 71, 0.5)";
     dropzone.style.background = isActive ? "rgba(40, 22, 18, 0.85)" : "rgba(28, 15, 11, 0.65)";
 };
 
-["dragenter", "dragover"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        highlightDropzone(true);
+if (dropzone) {
+    ["dragenter", "dragover"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            highlightDropzone(true);
+        });
     });
-});
 
-["dragleave", "drop"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        highlightDropzone(false);
+    ["dragleave", "drop"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            highlightDropzone(false);
+        });
     });
-});
 
-dropzone.addEventListener("drop", (event) => {
-    const files = event.dataTransfer?.files;
-    if (!files || files.length === 0) return;
+    dropzone.addEventListener("drop", (event) => {
+        const files = event.dataTransfer?.files;
+        if (!files || files.length === 0) return;
 
-    fileInput.files = files;
-    fileInput.dispatchEvent(new Event("change"));
+        fileInput.files = files;
+        fileInput.dispatchEvent(new Event("change"));
+    });
+}
+
+form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!selectedFile || !supportsCapture) return;
+
+    convertBtn.disabled = true;
+    statusMessage.textContent = "Stoking the hearth for your audio potion...";
+    resultBox.hidden = true;
+    progressGroup.hidden = false;
+    updateProgress(0);
+
+    const formatChoice = new FormData(form).get("format")?.toString() ?? "mp3";
+    const outputExt = formatChoice === "wav" ? "wav" : "mp3";
+    let videoUrl;
+
+    const detachProgress = (() => {
+        const handler = () => {
+            if (!Number.isFinite(hiddenVideo.duration) || hiddenVideo.duration === 0) return;
+            const percent = (hiddenVideo.currentTime / hiddenVideo.duration) * 100;
+            updateProgress(percent);
+        };
+        hiddenVideo.addEventListener("timeupdate", handler);
+        hiddenVideo.addEventListener("ended", handler);
+        return () => {
+            hiddenVideo.removeEventListener("timeupdate", handler);
+            hiddenVideo.removeEventListener("ended", handler);
+        };
+    })();
+
+    try {
+        videoUrl = URL.createObjectURL(selectedFile);
+        hiddenVideo.src = videoUrl;
+        hiddenVideo.currentTime = 0;
+        hiddenVideo.volume = 0;
+        hiddenVideo.muted = true;
+
+        await waitForEvent(hiddenVideo, "loadedmetadata");
+
+        const mimeType = selectRecorderMimeType();
+        statusMessage.textContent = "Siphoning the audio essence...";
+        const recordedBlob = await recordAudioFromVideo(hiddenVideo, mimeType);
+
+        statusMessage.textContent = "Distilling the final potion...";
+        const audioBuffer = await decodeBlobToAudioBuffer(recordedBlob);
+
+        const finalBlob = outputExt === "wav" ? encodeWav(audioBuffer) : encodeMp3(audioBuffer);
+
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+        }
+        currentObjectUrl = URL.createObjectURL(finalBlob);
+
+        const baseName = selectedFile.name.replace(/\.[^/.]+$/, "");
+        downloadLink.href = currentObjectUrl;
+        downloadLink.download = `${baseName || "audio"}.${outputExt}`;
+        downloadLink.textContent = `Download ${outputExt.toUpperCase()}`;
+
+        updateProgress(100);
+        statusMessage.textContent = "Transmutation complete.";
+        resultBox.hidden = false;
+    } catch (error) {
+        console.error(error);
+        statusMessage.textContent = error?.message || "The ritual faltered. Please try another file.";
+        resetProgress();
+    } finally {
+        detachProgress();
+        if (videoUrl) {
+            URL.revokeObjectURL(videoUrl);
+        }
+        hiddenVideo.pause();
+        hiddenVideo.removeAttribute("src");
+        hiddenVideo.load();
+        convertBtn.disabled = false;
+    }
 });
