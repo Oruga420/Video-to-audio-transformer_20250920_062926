@@ -31,7 +31,7 @@
             <form class="converter" id="converter-form">
                 <label class="dropzone" for="video-input">
                     <input type="file" id="video-input" accept="video/*" hidden />
-                    <span class="dropzone__icon">&#x1F56F;</span>
+                    <span class="dropzone__icon">???</span>
                     <span class="dropzone__text">Drop a video offering or click to browse</span>
                     <span class="dropzone__hint">Most formats welcomed: MP4, MOV, MKV, AVI, and more.</span>
                 </label>
@@ -60,15 +60,12 @@
             </div>
 
             <div class="result" id="result" hidden>
-                <p class="result__message">&#x2728; Your audio spell is ready.</p>
+                <p class="result__message">? Your audio spell is ready.</p>
                 <a id="download-link" class="download-btn" download>Download Audio</a>
             </div>
         </section>
     </main>
 
-    <video id="hidden-video" class="hidden-video" playsinline aria-hidden="true"></video>
-
-    <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.0/lame.min.js" defer></script>
     <script type="module" src="app.js"></script>
 </body>
 </html>

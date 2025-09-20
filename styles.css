@@ -421,10 +421,5 @@ header p {
         height: 90px;
     }
 }
-.hidden-video {
-    position: fixed;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
     pointer-events: none;
 }
