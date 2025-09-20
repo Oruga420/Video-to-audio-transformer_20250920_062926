@@ -11,13 +11,33 @@ const downloadLink = document.getElementById("download-link");
 const hiddenVideo = document.getElementById("hidden-video");
 const dropzone = document.querySelector(".dropzone");
 
+const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+const supportsWebAudio = typeof AudioContextClass === "function";
+let audioContext;
 let currentObjectUrl = null;
 let selectedFile = null;
-let audioContext;
 
 const supportsCapture =
     typeof MediaRecorder !== "undefined" &&
-    (typeof hiddenVideo.captureStream === "function" || typeof hiddenVideo.mozCaptureStream === "function");
+    (typeof hiddenVideo?.captureStream === "function" || typeof hiddenVideo?.mozCaptureStream === "function");
+
+const ensureAudioContext = () => {
+    if (!supportsWebAudio) {
+        throw new Error("Web Audio support is required for this ritual.");
+    }
+    if (!audioContext || audioContext.state === "closed") {
+        audioContext = new AudioContextClass();
+    }
+    return audioContext;
+};
+
+const resumeAudioContextIfNeeded = async () => {
+    const ctx = ensureAudioContext();
+    if (ctx.state === "suspended" && typeof ctx.resume === "function") {
+        await ctx.resume();
+    }
+    return ctx;
+};
 
 const updateProgress = (percent) => {
     const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
@@ -39,16 +59,18 @@ const getCaptureStream = (video) => {
     return null;
 };
 
-const ensureAudioContext = () => {
-    if (!audioContext || audioContext.state === "closed") {
-        audioContext = new AudioContext();
+const decodeFileWithWebAudio = async (file) => {
+    const ctx = await resumeAudioContextIfNeeded();
+    const arrayBuffer = await file.arrayBuffer();
+    if (!arrayBuffer.byteLength) {
+        throw new Error("The offered file appears empty.");
     }
-    return audioContext;
+    return ctx.decodeAudioData(arrayBuffer.slice(0));
 };
 
 const decodeBlobToAudioBuffer = async (blob) => {
+    const ctx = await resumeAudioContextIfNeeded();
     const buffer = await blob.arrayBuffer();
-    const ctx = ensureAudioContext();
     return ctx.decodeAudioData(buffer.slice(0));
 };
 
@@ -228,7 +250,13 @@ const recordAudioFromVideo = (video, mimeType) =>
             { once: true }
         );
 
-        recorder.start();
+        try {
+            recorder.start();
+        } catch (error) {
+            reject(error);
+            return;
+        }
+
         const playPromise = video.play();
         if (playPromise && typeof playPromise.catch === "function") {
             playPromise.catch((error) => {
@@ -238,9 +266,60 @@ const recordAudioFromVideo = (video, mimeType) =>
         }
     });
 
-if (!supportsCapture) {
+const captureAudioBufferViaPlayback = async (file) => {
+    if (!hiddenVideo) {
+        throw new Error("Fallback playback element missing.");
+    }
+    let videoUrl;
+    const detachProgress = (() => {
+        const handler = () => {
+            if (!Number.isFinite(hiddenVideo.duration) || hiddenVideo.duration === 0) return;
+            const percent = (hiddenVideo.currentTime / hiddenVideo.duration) * 90;
+            updateProgress(percent);
+        };
+        hiddenVideo.addEventListener("timeupdate", handler);
+        hiddenVideo.addEventListener("ended", handler);
+        return () => {
+            hiddenVideo.removeEventListener("timeupdate", handler);
+            hiddenVideo.removeEventListener("ended", handler);
+        };
+    })();
+
+    try {
+        videoUrl = URL.createObjectURL(file);
+        hiddenVideo.src = videoUrl;
+        hiddenVideo.currentTime = 0;
+        hiddenVideo.volume = 0;
+        hiddenVideo.muted = true;
+
+        await waitForEvent(hiddenVideo, "loadedmetadata");
+        updateProgress(5);
+
+        const mimeType = selectRecorderMimeType();
+        const recordedBlob = await recordAudioFromVideo(hiddenVideo, mimeType);
+        updateProgress(95);
+
+        return decodeBlobToAudioBuffer(recordedBlob);
+    } finally {
+        detachProgress();
+        hiddenVideo.pause();
+        hiddenVideo.removeAttribute("src");
+        hiddenVideo.load();
+        if (videoUrl) {
+            URL.revokeObjectURL(videoUrl);
+        }
+    }
+};
+
+const highlightDropzone = (isActive) => {
+    if (!dropzone) return;
+    dropzone.style.borderColor = isActive ? "rgba(214, 166, 71, 0.85)" : "rgba(214, 166, 71, 0.5)";
+    dropzone.style.background = isActive ? "rgba(40, 22, 18, 0.85)" : "rgba(28, 15, 11, 0.65)";
+};
+
+if (!supportsWebAudio) {
     convertBtn.disabled = true;
-    statusMessage.textContent = "This ritual needs a modern browser with MediaRecorder support.";
+    statusMessage.textContent = "This ritual requires a modern browser with Web Audio support.";
 }
 
 fileInput.addEventListener("change", (event) => {
@@ -252,23 +331,16 @@ fileInput.addEventListener("change", (event) => {
         currentObjectUrl = null;
     }
 
-    if (selectedFile && supportsCapture) {
-        convertBtn.disabled = false;
-        statusMessage.textContent = `Offering received: ${selectedFile.name}`;
-    } else if (!supportsCapture) {
-        convertBtn.disabled = true;
-        statusMessage.textContent = "This ritual needs a modern browser with MediaRecorder support.";
+    if (selectedFile) {
+        convertBtn.disabled = !supportsWebAudio;
+        statusMessage.textContent = supportsWebAudio
+            ? `Offering received: ${selectedFile.name}`
+            : "This ritual requires a modern browser with Web Audio support.";
     } else {
         convertBtn.disabled = true;
         statusMessage.textContent = "Awaiting your video...";
     }
 });
-
-const highlightDropzone = (isActive) => {
-    if (!dropzone) return;
-    dropzone.style.borderColor = isActive ? "rgba(214, 166, 71, 0.85)" : "rgba(214, 166, 71, 0.5)";
-    dropzone.style.background = isActive ? "rgba(40, 22, 18, 0.85)" : "rgba(28, 15, 11, 0.65)";
-};
 
 if (dropzone) {
     ["dragenter", "dragover"].forEach((eventName) => {
@@ -298,48 +370,35 @@ if (dropzone) {
 
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!selectedFile || !supportsCapture) return;
+    if (!selectedFile || !supportsWebAudio) return;
 
     convertBtn.disabled = true;
-    statusMessage.textContent = "Stoking the hearth for your audio potion...";
+    statusMessage.textContent = "Consulting the arcane archives...";
     resultBox.hidden = true;
     progressGroup.hidden = false;
-    updateProgress(0);
+    updateProgress(5);
 
     const formatChoice = new FormData(form).get("format")?.toString() ?? "mp3";
     const outputExt = formatChoice === "wav" ? "wav" : "mp3";
-    let videoUrl;
-
-    const detachProgress = (() => {
-        const handler = () => {
-            if (!Number.isFinite(hiddenVideo.duration) || hiddenVideo.duration === 0) return;
-            const percent = (hiddenVideo.currentTime / hiddenVideo.duration) * 100;
-            updateProgress(percent);
-        };
-        hiddenVideo.addEventListener("timeupdate", handler);
-        hiddenVideo.addEventListener("ended", handler);
-        return () => {
-            hiddenVideo.removeEventListener("timeupdate", handler);
-            hiddenVideo.removeEventListener("ended", handler);
-        };
-    })();
 
     try {
-        videoUrl = URL.createObjectURL(selectedFile);
-        hiddenVideo.src = videoUrl;
-        hiddenVideo.currentTime = 0;
-        hiddenVideo.volume = 0;
-        hiddenVideo.muted = true;
+        let audioBuffer;
 
-        await waitForEvent(hiddenVideo, "loadedmetadata");
-
-        const mimeType = selectRecorderMimeType();
-        statusMessage.textContent = "Siphoning the audio essence...";
-        const recordedBlob = await recordAudioFromVideo(hiddenVideo, mimeType);
+        try {
+            audioBuffer = await decodeFileWithWebAudio(selectedFile);
+            updateProgress(60);
+        } catch (decodeError) {
+            console.warn("Direct decode failed, attempting playback capture.", decodeError);
+            if (!supportsCapture) {
+                throw new Error(
+                    "Your browser cannot extract audio from this format. Try Chrome or Edge, or use a different file."
+                );
+            }
+            statusMessage.textContent = "Direct decoding resisted. Invoking live playback capture...";
+            audioBuffer = await captureAudioBufferViaPlayback(selectedFile);
+        }
 
         statusMessage.textContent = "Distilling the final potion...";
-        const audioBuffer = await decodeBlobToAudioBuffer(recordedBlob);
-
         const finalBlob = outputExt === "wav" ? encodeWav(audioBuffer) : encodeMp3(audioBuffer);
 
         if (currentObjectUrl) {
@@ -360,13 +419,6 @@ form.addEventListener("submit", async (event) => {
         statusMessage.textContent = error?.message || "The ritual faltered. Please try another file.";
         resetProgress();
     } finally {
-        detachProgress();
-        if (videoUrl) {
-            URL.revokeObjectURL(videoUrl);
-        }
-        hiddenVideo.pause();
-        hiddenVideo.removeAttribute("src");
-        hiddenVideo.load();
-        convertBtn.disabled = false;
+        convertBtn.disabled = !selectedFile || !supportsWebAudio;
     }
 });
