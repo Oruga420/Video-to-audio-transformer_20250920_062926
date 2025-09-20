@@ -1,0 +1,3 @@
+mcp_servers:
+  - name: "zapier"
+    url: "https://actions.zapier.com/mcp/sk-ak-lqvazGE6ICJFI1hY2SLeGx8HOP/sse"
