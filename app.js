@@ -195,7 +195,7 @@ const captureAudioFromFile = async (file, handleProgress) => {
     const objectUrl = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.preload = "auto";
-    video.muted = false;
+    video.muted = true;
     video.volume = 0;
     video.playsInline = true;
     video.hidden = true;
@@ -204,9 +204,7 @@ const captureAudioFromFile = async (file, handleProgress) => {
     video.src = objectUrl;
 
     let recorder;
-    let source;
-    let destination;
-    let silencer;
+    let streamCleanup = () => {};
     let handleTimeUpdate;
 
     const cleanup = () => {
@@ -217,23 +215,8 @@ const captureAudioFromFile = async (file, handleProgress) => {
             if (recorder && recorder.state !== "inactive") {
                 recorder.stop();
             }
-        } catch (error) {
-            // ignore stopping error
-        }
-        if (source) {
-            try {
-                source.disconnect();
-            } catch (error) {
-                // ignore
-            }
-        }
-        if (silencer) {
-            try {
-                silencer.disconnect();
-            } catch (error) {
-                // ignore
-            }
-        }
+        } catch (error) {}
+        streamCleanup();
         video.pause();
         video.removeAttribute("src");
         video.load();
@@ -241,22 +224,58 @@ const captureAudioFromFile = async (file, handleProgress) => {
         URL.revokeObjectURL(objectUrl);
     };
 
-    try {
-        await waitForEvent(video, "loadedmetadata");
-        handleProgress?.(5);
+    const getStreamFromVideo = () => {
+        const directCapture =
+            typeof video.captureStream === "function"
+                ? video.captureStream()
+                : typeof video.mozCaptureStream === "function"
+                ? video.mozCaptureStream()
+                : null;
 
-        source = ctx.createMediaElementSource(video);
-        destination = ctx.createMediaStreamDestination();
-        silencer = ctx.createGain();
+        if (directCapture) {
+            const audioTracks = directCapture.getAudioTracks();
+            if (audioTracks.length) {
+                const audioStream = new MediaStream();
+                audioTracks.forEach((track) => audioStream.addTrack(track));
+                streamCleanup = () => {
+                    audioTracks.forEach((track) => track.stop());
+                };
+                return audioStream;
+            }
+        }
+
+        const source = ctx.createMediaElementSource(video);
+        const destination = ctx.createMediaStreamDestination();
+        const silencer = ctx.createGain();
         silencer.gain.value = 0;
 
         source.connect(destination);
         source.connect(silencer);
         silencer.connect(ctx.destination);
 
+        streamCleanup = () => {
+            try {
+                source.disconnect();
+            } catch (error) {}
+            try {
+                silencer.disconnect();
+            } catch (error) {}
+        };
+        return destination.stream;
+    };
+
+    try {
+        await waitForEvent(video, "loadedmetadata");
+        handleProgress?.(5);
+
+        const stream = getStreamFromVideo();
+        if (!stream || !stream.getAudioTracks().length) {
+            throw new Error("No audio track detected in this video.");
+        }
+
         const mimeType = selectRecorderMimeType();
         try {
-            recorder = mimeType ? new MediaRecorder(destination.stream, { mimeType }) : new MediaRecorder(destination.stream);
+            recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
         } catch (error) {
             throw new Error("Unable to start the recording ritual in this browser.");
         }
