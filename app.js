@@ -195,7 +195,8 @@ const captureAudioFromFile = async (file, handleProgress) => {
     const objectUrl = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.preload = "auto";
-    video.muted = true;
+    video.muted = false;
+    video.volume = 0;
     video.playsInline = true;
     video.hidden = true;
     video.crossOrigin = "anonymous";
